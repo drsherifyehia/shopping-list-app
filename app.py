@@ -3,143 +3,125 @@ import pandas as pd
 import datetime
 import math
 
-st.set_page_config(page_title="Shopping List App", layout="wide")
+st.set_page_config(page_title="Inventory Planner", layout="wide")
 
-st.title("🛒 Shopping List Inventory Manager")
+st.title("📦 Clinic Inventory & Shopping List")
 
-# Define our 4 tabs
+# Define tabs
 tab1, tab2, tab3, tab4 = st.tabs([
-    "1. Upload", 
+    "1. Upload Sheets", 
     "2. Consolidate", 
-    "3. Master Depletion Date", 
+    "3. Depletion Forecast", 
     "4. Monthly Shopping List"
 ])
 
 # --- TAB 1: UPLOAD ---
 with tab1:
-    st.header("Upload Excel Sheets")
+    st.header("Upload Excel Files")
     col1, col2 = st.columns(2)
     
     with col1:
-        file1 = st.file_uploader("Upload Sheet 1 (items, type, price, amu)", type=["xlsx", "xls"])
+        file_amu = st.file_uploader("Upload AMU Sheet (Cols A, B, D, G)", type=["xlsx", "xls"])
     with col2:
-        file2 = st.file_uploader("Upload Sheet 2 (Name, Type, Branch Amount, Master Amount)", type=["xlsx", "xls"])
+        file_sheet2 = st.file_uploader("Upload Sheet 2 (Cols B, D, F, G)", type=["xlsx", "xls"])
 
-    if file1 and file2:
+    if file_amu and file_sheet2:
         try:
-            # Read Sheet 1 normally
-            df1 = pd.read_excel(file1)
+            # AMU Sheet: A=inventoryItem, B=inventoryType, D=price, G=AMU
+            df_amu = pd.read_excel(file_amu, usecols="A,B,D,G")
+            df_amu.columns = ["inventoryItem", "inventoryType", "price", "AMU"]
             
-            # Read Sheet 2 extracting only specific columns. 
-            # In Pandas (0-indexed): B=1, D=3, F=5, G=6 
-            df2 = pd.read_excel(
-                file2, 
-                usecols="B,D,F,G", 
-                names=["Name", "Type_Sheet2", "Branch Amount", "Master Amount"]
-            )
+            # Sheet 2: B=Name, D=Type, F=branch amount, G=master amount
+            df_s2 = pd.read_excel(file_sheet2, usecols="B,D,F,G")
+            df_s2.columns = ["Name", "Type", "branch amount", "master amount"]
             
-            # Save dataframes to session state to share across tabs
-            st.session_state['df1'] = df1
-            st.session_state['df2'] = df2
-            st.success("Files successfully uploaded and read! Proceed to the next tab.")
+            # Clean strings for matching
+            for df, col in [(df_amu, 'inventoryItem'), (df_s2, 'Name')]:
+                df[col] = df[col].astype(str).str.strip()
+
+            st.session_state['df_amu'] = df_amu
+            st.session_state['df_s2'] = df_s2
+            st.success("Sheets mapped successfully! Proceed to Tab 2.")
         except Exception as e:
-            st.error(f"Error reading files: {e}")
+            st.error(f"Mapping Error: {e}. Please ensure columns match the specified letters.")
 
 # --- TAB 2: CONSOLIDATE ---
 with tab2:
-    st.header("Consolidated Inventory List")
-    if 'df1' in st.session_state and 'df2' in st.session_state:
-        df1 = st.session_state['df1']
-        df2 = st.session_state['df2']
-        
-        # Consolidate according to Item Name
-        merged_df = pd.merge(df1, df2, left_on="items", right_on="Name", how="outer")
-        
+    st.header("Consolidated Data")
+    if 'df_amu' in st.session_state and 'df_s2' in st.session_state:
+        # Merge on Item Name
+        merged_df = pd.merge(
+            st.session_state['df_amu'], 
+            st.session_state['df_s2'], 
+            left_on="inventoryItem", 
+            right_on="Name", 
+            how="inner"
+        )
         st.session_state['merged_df'] = merged_df
         st.dataframe(merged_df, use_container_width=True)
     else:
-        st.info("Please upload your sheets in the 'Upload' tab first.")
+        st.info("Waiting for file uploads...")
 
-# --- TAB 3: CALCULATE ---
+# --- TAB 3: DEPLETION DATE ---
 with tab3:
-    st.header("Master Stock Depletion Calculation")
+    st.header("Master Stock Depletion Forecast")
     if 'merged_df' in st.session_state:
         calc_df = st.session_state['merged_df'].copy()
         
-        def calculate_finish_month(row):
+        def get_depletion_month(row):
             try:
-                master_amt = float(row.get('Master Amount', 0))
-                amu = float(row.get('amu', 0))
+                master = float(row['master amount'])
+                amu = float(row['AMU'])
+                if amu <= 0: return "N/A (No Usage)"
                 
-                # Handle edge cases where data is missing or AMU is 0
-                if pd.isna(master_amt) or pd.isna(amu) or amu <= 0:
-                    return "Unknown"
-                    
-                # Calculate how many months until master stock hits 0
-                months_left = math.ceil(master_amt / amu)
-                
-                # Add the months left to today's date
-                finish_date = datetime.date.today() + pd.DateOffset(months=int(months_left))
-                return finish_date.strftime("%B %Y")
+                months_until_zero = math.ceil(master / amu)
+                target_date = datetime.date.today() + pd.DateOffset(months=months_until_zero)
+                return target_date.strftime("%B %Y")
             except:
-                return "Error"
+                return "Data Error"
 
-        # Apply calculation row-by-row
-        calc_df['Finish Month'] = calc_df.apply(calculate_finish_month, axis=1)
+        calc_df['Finish Month'] = calc_df.apply(get_depletion_month, axis=1)
         st.session_state['calc_df'] = calc_df
-        st.dataframe(calc_df, use_container_width=True)
+        st.dataframe(calc_df[['inventoryItem', 'master amount', 'AMU', 'Finish Month']], use_container_width=True)
     else:
-        st.info("Consolidated data is not available yet.")
+        st.info("Consolidate data in Tab 2 first.")
 
-# --- TAB 4: FILTER & DISPLAY ---
+# --- TAB 4: SHOPPING LIST & FILTERS ---
 with tab4:
-    st.header("Monthly Shopping List")
+    st.header("Shopping List Generator")
     if 'calc_df' in st.session_state:
         df = st.session_state['calc_df']
         
-        # 1. Dropdown List for Months
-        valid_months = [m for m in df['Finish Month'].dropna().unique() if m not in ["Unknown", "Error"]]
-        # Sort months chronologically so the dropdown looks clean
-        valid_months.sort(key=lambda d: datetime.datetime.strptime(d, "%B %Y"))
+        # Filters
+        all_months = sorted([m for m in df['Finish Month'].unique() if " " in m], 
+                            key=lambda x: datetime.datetime.strptime(x, "%B %Y"))
         
-        selected_month = st.selectbox("Select the month the master stock finishes:", options=valid_months)
-        
-        # 2. Checkbox Filters for Material Type
-        st.write("**Filter by Material Type:**")
-        # Default to Sheet 1's type column, fallback to Sheet 2's if missing
-        type_col = 'type' if 'type' in df.columns else 'Type_Sheet2'
-        unique_types = df[type_col].dropna().unique()
-        
-        selected_types = []
-        # Create a dynamic grid of checkboxes
-        cols = st.columns(min(len(unique_types), 4) if len(unique_types) > 0 else 1)
-        for i, material_type in enumerate(unique_types):
-            with cols[i % len(cols)]:
-                # Checkboxes default to True
-                if st.checkbox(str(material_type), value=True):
-                    selected_types.append(material_type)
-        
-        # 3. Apply Filters and Formatting
-        if selected_month and selected_types:
-            filtered_df = df[(df['Finish Month'] == selected_month) & (df[type_col].isin(selected_types))]
-            
-            def highlight_stock(row):
-                try:
-                    branch_amt = float(row.get('Branch Amount', 0))
-                except:
-                    branch_amt = 0
-                    
-                # If an item appears here, its Master stock is 0 for this month.
-                # If Branch is also 0, red. If Branch has stock, yellow.
-                if pd.isna(branch_amt) or branch_amt <= 0:
-                    return ['background-color: #ffcccc; color: #900000'] * len(row) # Red
-                else:
-                    return ['background-color: #ffffcc; color: #808000'] * len(row) # Yellow
-            
-            if not filtered_df.empty:
-                st.dataframe(filtered_df.style.apply(highlight_stock, axis=1), use_container_width=True)
-            else:
-                st.warning("No materials match the selected month and type filters.")
-    else:
-        st.info("Data processing incomplete. Please upload and consolidate first.")
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            selected_month = st.selectbox("Select Target Month:", all_months)
+        with col_b:
+            st.write("**Filter by Material Type:**")
+            types = df['inventoryType'].unique()
+            selected_types = [t for t in types if st.checkbox(str(t), value=True)]
 
+        # Apply Filters
+        final_list = df[(df['Finish Month'] == selected_month) & (df['inventoryType'].isin(selected_types))]
+
+        def apply_highlights(row):
+            # Red: Both Master and Branch are 0
+            # Yellow: Master is 0 (all items in this list have Master reaching 0)
+            master = float(row['master amount'])
+            branch = float(row['branch amount'])
+            
+            if branch <= 0:
+                return ['background-color: #ff4b4b; color: white'] * len(row) # Red
+            else:
+                return ['background-color: #fffd80; color: black'] * len(row) # Yellow
+
+        if not final_list.empty:
+            st.subheader(f"Items reaching zero stock in {selected_month}")
+            st.dataframe(final_list.style.apply(apply_highlights, axis=1), use_container_width=True)
+        else:
+            st.write("No items found for this selection.")
+    else:
+        st.info("Complete Tabs 1-3 to see the shopping list.")
