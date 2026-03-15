@@ -94,9 +94,22 @@ with tab4:
             st.markdown(f"### 📅 {m_str}")
             
             if not month_df.empty:
-                # UPDATED: Sum of Price (1 unit per item)
-                total_unit_cost = month_df['Price'].sum()
-                st.metric("Total List Cost (1 Unit Each)", f"${total_unit_cost:,.2f}")
+                # 1. Cost for buying 1 piece each
+                total_one_piece = month_df['Price'].sum()
+
+                # 2. Cost for Rounded AMU: <1 = 1, >=1 = Round Up
+                def round_amu_logic(val):
+                    if val < 1:
+                        return 1.0
+                    return float(math.ceil(val))
+
+                month_df['Rounded_AMU'] = month_df['AMU'].apply(round_amu_logic)
+                total_amu_cost = (month_df['Price'] * month_df['Rounded_AMU']).sum()
+
+                # Display Metrics
+                m1, m2 = st.columns(2)
+                m1.metric("Cost (1 Piece Each)", f"${total_one_piece:,.2f}")
+                m2.metric("Cost (Rounded AMU)", f"${total_amu_cost:,.2f}")
 
                 st.data_editor(
                     month_df[['Item', 'Type', 'Price', 'AMU', 'Branch', 'Master']].style.apply(style_rows, axis=1),
@@ -104,14 +117,6 @@ with tab4:
                     use_container_width=True,
                     num_rows="dynamic"
                 )
-
-                c1, c2 = st.columns([3, 1])
-                it = c1.selectbox("Select Item to Postpone:", month_df['Item'], key=f"sel_{i}")
-                if c2.button("Postpone ➡️", key=f"btn_{i}"):
-                    idx = df[df['Item'] == it].index
-                    df.loc[idx, 'TargetDate'] = df.loc[idx, 'TargetDate'] + pd.DateOffset(months=1)
-                    st.session_state['master_df'] = df
-                    st.rerun()
             else:
                 st.write("No items for this month.")
             st.divider()
