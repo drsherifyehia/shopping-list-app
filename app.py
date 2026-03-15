@@ -3,125 +3,108 @@ import pandas as pd
 import datetime
 import math
 
-st.set_page_config(page_title="Inventory Planner", layout="wide")
+st.set_page_config(page_title="Clinic Inventory", layout="wide")
 
-st.title("📦 Clinic Inventory & Shopping List")
+# --- DATA PERSISTENCE ---
+# We store the main dataframe in session_state so edits stay saved
+if 'master_df' not in st.session_state:
+    st.session_state['master_df'] = None
 
-# Define tabs
-tab1, tab2, tab3, tab4 = st.tabs([
-    "1. Upload Sheets", 
-    "2. Consolidate", 
-    "3. Depletion Forecast", 
-    "4. Monthly Shopping List"
-])
+st.title("🛒 Smart Shopping List")
 
-# --- TAB 1: UPLOAD ---
+tab1, tab2, tab3, tab4 = st.tabs(["1. Upload", "2. Consolidate", "3. Forecast", "4. Interactive Shopping List"])
+
+# --- TAB 1 & 2: Same as before but saving to master_df ---
 with tab1:
-    st.header("Upload Excel Files")
     col1, col2 = st.columns(2)
-    
-    with col1:
-        file_amu = st.file_uploader("Upload AMU Sheet (Cols A, B, D, G)", type=["xlsx", "xls"])
-    with col2:
-        file_sheet2 = st.file_uploader("Upload Sheet 2 (Cols B, D, F, G)", type=["xlsx", "xls"])
+    file_amu = col1.file_uploader("Upload AMU Sheet (A,B,D,G)", type=["xlsx"])
+    file_s2 = col2.file_uploader("Upload Sheet 2 (B,D,F,G)", type=["xlsx"])
 
-    if file_amu and file_sheet2:
-        try:
-            # AMU Sheet: A=inventoryItem, B=inventoryType, D=price, G=AMU
-            df_amu = pd.read_excel(file_amu, usecols="A,B,D,G")
-            df_amu.columns = ["inventoryItem", "inventoryType", "price", "AMU"]
-            
-            # Sheet 2: B=Name, D=Type, F=branch amount, G=master amount
-            df_s2 = pd.read_excel(file_sheet2, usecols="B,D,F,G")
-            df_s2.columns = ["Name", "Type", "branch amount", "master amount"]
-            
-            # Clean strings for matching
-            for df, col in [(df_amu, 'inventoryItem'), (df_s2, 'Name')]:
-                df[col] = df[col].astype(str).str.strip()
-
-            st.session_state['df_amu'] = df_amu
-            st.session_state['df_s2'] = df_s2
-            st.success("Sheets mapped successfully! Proceed to Tab 2.")
-        except Exception as e:
-            st.error(f"Mapping Error: {e}. Please ensure columns match the specified letters.")
-
-# --- TAB 2: CONSOLIDATE ---
-with tab2:
-    st.header("Consolidated Data")
-    if 'df_amu' in st.session_state and 'df_s2' in st.session_state:
-        # Merge on Item Name
-        merged_df = pd.merge(
-            st.session_state['df_amu'], 
-            st.session_state['df_s2'], 
-            left_on="inventoryItem", 
-            right_on="Name", 
-            how="inner"
-        )
-        st.session_state['merged_df'] = merged_df
-        st.dataframe(merged_df, use_container_width=True)
-    else:
-        st.info("Waiting for file uploads...")
-
-# --- TAB 3: DEPLETION DATE ---
-with tab3:
-    st.header("Master Stock Depletion Forecast")
-    if 'merged_df' in st.session_state:
-        calc_df = st.session_state['merged_df'].copy()
+    if file_amu and file_s2:
+        df_amu = pd.read_excel(file_amu, usecols="A,B,D,G").rename(columns={"inventoryItem":"Item", "inventoryType":"Type", "price":"Price", "AMU":"AMU"})
+        df_s2 = pd.read_excel(file_s2, usecols="B,D,F,G").rename(columns={"Name":"Item", "Type":"Type_S2", "branch amount":"Branch", "master amount":"Master"})
         
-        def get_depletion_month(row):
+        # Merge and clean
+        merged = pd.merge(df_amu, df_s2, on="Item", how="inner")
+        merged['Item'] = merged['Item'].astype(str).str.strip()
+        
+        # Initial Forecast Calculation
+        def calc_month(row):
             try:
-                master = float(row['master amount'])
-                amu = float(row['AMU'])
-                if amu <= 0: return "N/A (No Usage)"
-                
-                months_until_zero = math.ceil(master / amu)
-                target_date = datetime.date.today() + pd.DateOffset(months=months_until_zero)
-                return target_date.strftime("%B %Y")
-            except:
-                return "Data Error"
+                months = math.ceil(float(row['Master']) / float(row['AMU'])) if float(row['AMU']) > 0 else 0
+                return (datetime.date.today() + pd.DateOffset(months=months)).replace(day=1)
+            except: return datetime.date.today().replace(day=1)
 
-        calc_df['Finish Month'] = calc_df.apply(get_depletion_month, axis=1)
-        st.session_state['calc_df'] = calc_df
-        st.dataframe(calc_df[['inventoryItem', 'master amount', 'AMU', 'Finish Month']], use_container_width=True)
-    else:
-        st.info("Consolidate data in Tab 2 first.")
+        merged['TargetDate'] = merged.apply(calc_month, axis=1)
+        st.session_state['master_df'] = merged
+        st.success("Data Loaded!")
 
-# --- TAB 4: SHOPPING LIST & FILTERS ---
+with tab2:
+    if st.session_state['master_df'] is not None:
+        st.dataframe(st.session_state['master_df'], use_container_width=True)
+
+with tab3:
+    st.info("Forecast is now live in Tab 4.")
+
+# --- TAB 4: THE INTERACTIVE TRIPLE LIST ---
 with tab4:
-    st.header("Shopping List Generator")
-    if 'calc_df' in st.session_state:
-        df = st.session_state['calc_df']
-        
-        # Filters
-        all_months = sorted([m for m in df['Finish Month'].unique() if " " in m], 
-                            key=lambda x: datetime.datetime.strptime(x, "%B %Y"))
-        
-        col_a, col_b = st.columns([1, 2])
-        with col_a:
-            selected_month = st.selectbox("Select Target Month:", all_months)
-        with col_b:
-            st.write("**Filter by Material Type:**")
-            types = df['inventoryType'].unique()
-            selected_types = [t for t in types if st.checkbox(str(t), value=True)]
+    if st.session_state['master_df'] is not None:
+        df = st.session_state['master_df']
 
-        # Apply Filters
-        final_list = df[(df['Finish Month'] == selected_month) & (df['inventoryType'].isin(selected_types))]
+        # 1. Month Selection
+        start_month = st.date_input("Select Starting Month", datetime.date.today().replace(day=1))
+        month_list = [start_month + pd.DateOffset(months=i) for i in range(3)]
+        
+        # 2. Material Type Filter
+        all_types = df['Type'].unique()
+        selected_types = [t for t in all_types if st.checkbox(str(t), value=True, key=f"filter_{t}")]
 
-        def apply_highlights(row):
-            # Red: Both Master and Branch are 0
-            # Yellow: Master is 0 (all items in this list have Master reaching 0)
-            master = float(row['master amount'])
-            branch = float(row['branch amount'])
+        # We loop 3 times to create 3 vertical lists
+        for i, current_month in enumerate(month_list):
+            month_str = current_month.strftime("%B %Y")
             
-            if branch <= 0:
-                return ['background-color: #ff4b4b; color: white'] * len(row) # Red
-            else:
-                return ['background-color: #fffd80; color: black'] * len(row) # Yellow
+            # Filter data for this specific list
+            mask = (df['TargetDate'].dt.month == current_month.month) & \
+                   (df['TargetDate'].dt.year == current_month.year) & \
+                   (df['Type'].isin(selected_types))
+            
+            month_df = df[mask].copy()
+            
+            # UI Styling
+            st.markdown(f"---")
+            total_price = (month_df['Price'] * month_df['AMU']).sum()
+            st.subheader(f"📅 {month_str}")
+            st.metric("Total Estimated Cost", f"${total_price:,.2f}")
 
-        if not final_list.empty:
-            st.subheader(f"Items reaching zero stock in {selected_month}")
-            st.dataframe(final_list.style.apply(apply_highlights, axis=1), use_container_width=True)
-        else:
-            st.write("No items found for this selection.")
+            # 3. EDITABLE TABLE (Add/Delete/Edit)
+            # Users can tap cells to change Price, AMU, or Item names
+            edited_df = st.data_editor(
+                month_df,
+                key=f"editor_{month_str}",
+                num_rows="dynamic", # Allows adding/deleting rows
+                use_container_width=True,
+                column_config={
+                    "TargetDate": st.column_config.DateColumn(disabled=True),
+                    "Price": st.column_config.NumberColumn(format="$%.2f"),
+                }
+            )
+
+            # 4. POSTPONE LOGIC
+            if not month_df.empty:
+                col_move1, col_move2 = st.columns([2, 1])
+                item_to_move = col_move1.selectbox(f"Postpone an item from {month_str}:", month_df['Item'], key=f"select_{i}")
+                
+                if col_move2.button(f"Move to Next Month ➡️", key=f"btn_{i}"):
+                    # Update the date in the main session state
+                    idx = df[df['Item'] == item_to_move].index
+                    df.loc[idx, 'TargetDate'] = current_month + pd.DateOffset(months=1)
+                    st.session_state['master_df'] = df
+                    st.rerun()
+
+            # Save edits back to master_df
+            if not edited_df.equals(month_df):
+                df.update(edited_df)
+                st.session_state['master_df'] = df
+
     else:
-        st.info("Complete Tabs 1-3 to see the shopping list.")
+        st.warning("Please upload files in Tab 1 first.")
