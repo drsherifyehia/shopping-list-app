@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import datetime
 import math
+from io import BytesIO
 
 st.set_page_config(page_title="Clinic Inventory", layout="wide")
 
@@ -20,11 +21,18 @@ with tab1:
 
     if file_amu and file_s2:
         try:
-            df_amu = pd.read_excel(file_amu, usecols="A,B,D,G").rename(columns={"inventoryItem":"Item", "inventoryType":"Type", "price":"Price", "AMU":"AMU"})
-            df_s2 = pd.read_excel(file_s2, usecols="B,D,F,G").rename(columns={"Name":"Item", "Type":"Type_S2", "branch amount":"Branch", "master amount":"Master"})
+            # Load by position to avoid KeyError
+            df_amu = pd.read_excel(file_amu, usecols="A,B,D,G")
+            df_amu.columns = ["Item", "Type", "Price", "AMU"]
             
+            df_s2 = pd.read_excel(file_s2, usecols="B,D,F,G")
+            df_s2.columns = ["Item", "Type_S2", "Branch", "Master"]
+            
+            # Clean item names for matching
+            df_amu['Item'] = df_amu['Item'].astype(str).str.strip()
+            df_s2['Item'] = df_s2['Item'].astype(str).str.strip()
+
             merged = pd.merge(df_amu, df_s2, on="Item", how="inner")
-            merged['Item'] = merged['Item'].astype(str).str.strip()
             
             def calc_month(row):
                 try:
@@ -34,18 +42,11 @@ with tab1:
                     return (datetime.date.today() + pd.DateOffset(months=months)).replace(day=1)
                 except: return datetime.date.today().replace(day=1)
 
-            merged['TargetDate'] = merged.apply(calc_month, axis=1)
-            # FIX: Force TargetDate to be a datetime type
-            merged['TargetDate'] = pd.to_datetime(merged['TargetDate'])
-            
+            merged['TargetDate'] = pd.to_datetime(merged.apply(calc_month, axis=1))
             st.session_state['master_df'] = merged
-            st.success("Data Loaded Successfully!")
+            st.success("Data Loaded! Columns mapped by position.")
         except Exception as e:
-            st.error(f"Error: {e}")
-
-with tab2:
-    if st.session_state['master_df'] is not None:
-        st.dataframe(st.session_state['master_df'], use_container_width=True)
+            st.error(f"Error loading files: {e}")
 
 with tab4:
     if st.session_state['master_df'] is not None:
@@ -53,30 +54,23 @@ with tab4:
 
         # 1. Selection & Filters
         start_month = st.date_input("Select Starting Month", datetime.date.today().replace(day=1))
-        # Ensure start_month is a Timestamp for comparison
         start_ts = pd.Timestamp(start_month)
         month_list = [start_ts + pd.DateOffset(months=i) for i in range(3)]
         
         st.write("**Filter by Material Type:**")
         all_types = sorted(df['Type'].unique().astype(str))
-        cols = st.columns(3)
-        selected_types = []
-        for i, t in enumerate(all_types):
-            if cols[i % 3].checkbox(t, value=True, key=f"filter_{t}"):
-                selected_types.append(t)
+        selected_types = [t for t in all_types if st.checkbox(t, value=True, key=f"f_{t}")]
 
-        # Highlight Function
+        # Highlight Function - Safe check for column existence
         def style_rows(row):
-            # Since these items are in the shopping list, Master is assumed near 0
-            branch = float(row['Branch']) if not pd.isna(row['Branch']) else 0
-            if branch <= 0:
-                return ['background-color: #ff4b4b; color: white'] * len(row) # Red
-            return ['background-color: #fffd80; color: black'] * len(row) # Yellow
+            b_val = float(row['Branch']) if 'Branch' in row and not pd.isna(row['Branch']) else 0
+            if b_val <= 0:
+                return ['background-color: #ff4b4b; color: white'] * len(row)
+            return ['background-color: #fffd80; color: black'] * len(row)
 
         # 2. Loop through 3 months
         for i, current_month in enumerate(month_list):
             month_str = current_month.strftime("%B %Y")
-            
             mask = (df['TargetDate'].dt.month == current_month.month) & \
                    (df['TargetDate'].dt.year == current_month.year) & \
                    (df['Type'].isin(selected_types))
@@ -85,10 +79,10 @@ with tab4:
             
             st.markdown(f"### 📅 {month_str}")
             total_price = (month_df['Price'] * month_df['AMU']).sum()
-            st.metric(f"Total for {month_str}", f"${total_price:,.2f}")
+            st.metric(f"Total Price", f"${total_price:,.2f}")
 
             if not month_df.empty:
-                # 3. Editable Table with Highlighting
+                # Editable Table
                 edited_df = st.data_editor(
                     month_df.style.apply(style_rows, axis=1),
                     key=f"editor_{i}",
@@ -96,17 +90,28 @@ with tab4:
                     use_container_width=True
                 )
 
-                # 4. Postpone Logic
-                col_move1, col_move2 = st.columns([3, 1])
-                item_to_move = col_move1.selectbox(f"Move item from {month_str}:", month_df['Item'], key=f"sel_{i}")
-                
-                if col_move2.button(f"Postpone ➡️", key=f"btn_{i}"):
+                # Postpone Logic
+                col_m1, col_m2 = st.columns([3, 1])
+                item_to_move = col_m1.selectbox(f"Select Item:", month_df['Item'], key=f"s_{i}")
+                if col_m2.button(f"Postpone ➡️", key=f"b_{i}"):
                     idx = df[df['Item'] == item_to_move].index
                     df.loc[idx, 'TargetDate'] = current_month + pd.DateOffset(months=1)
                     st.session_state['master_df'] = df
                     st.rerun()
             else:
-                st.write("No items for this month.")
+                st.write("List is empty for this month.")
             st.markdown("---")
+            
+        # Download Button
+        if st.button("Generate Excel Report"):
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, sheet_name='Master_Shopping_List')
+            st.download_button(
+                label="📥 Download Full List",
+                data=output.getvalue(),
+                file_name=f"shopping_list_{datetime.date.today()}.xlsx",
+                mime="application/vnd.ms-excel"
+            )
     else:
-        st.info("Upload files in Tab 1 to begin.")
+        st.info("Please upload files in Tab 1.")
